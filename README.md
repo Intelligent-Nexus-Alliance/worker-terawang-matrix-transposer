@@ -1,79 +1,83 @@
-# Layanan Pemrosesan Data Sensor Tomografi
+# Terawang — Worker Matrix Transposer
 
-Skrip ini berfungsi sebagai layanan latar belakang (daemon) yang secara otomatis memproses data sensor tomografi.
+Daemon Python yang memantau folder FTP, mengelompokkan 8 berkas sinyal sensor suara menjadi satu batch, menghitung matriks kecepatan 8x8 dengan GCC-PHAT (numpy 2.3, scipy 1.15.3), lalu mengunggah hasil ke FTP dan mengirim notifikasi ke RabbitMQ (pika).
 
-## Update
+| | |
+|---|---|
+| Produk | Terawang (Sound Sensor) |
+| Layer | Worker (Python) |
+| PIC | Arsal |
+| Asal | Cermin fork dari `ASPRG/terawang-matrix-transposer`; pekerjaan aktif masih di repo induk sampai issue selesai, lalu disinkronkan ke INA |
 
-Perbaikan AI-written code pada function `gcc` dan `onetap`.
+## Repo terkait
 
-## Alur Kerja
+| Repo | Peran |
+|---|---|
+| `iot-terawang` | Firmware sensor suara (sumber sinyal) |
+| `worker-terawang` | Worker Node.js produk Terawang |
+| `worker-terawang-dashboard` | API + halaman dashboard survei (Flask) |
+| `be-terawang` | Backend |
+| `web-terawang` | Web |
+| `mobile-terawang` | Aplikasi mobile |
 
-1.  **Memonitor**: Terus-menerus memonitor folder `data_mentah` untuk file JSON baru.
-2.  **Mengelompokkan**: Mencari satu set data yang terdiri dari 8 file JSON (`_1.json` hingga `_8.json`) yang berasal dari perangkat yang sama dan dibuat dalam rentang waktu 15 menit.
-3.  **Memproses**: Jika satu set data yang valid ditemukan, skrip akan menjalankan algoritma _Generalized Cross-Correlation_ (GCC-PHAT) untuk menghitung matriks kecepatan 8x8.
-4.  **Menyimpan**: Menyimpan file hasil pemrosesan (misalnya, `result_guid_timestamp.json`) di folder lokal `hasil_proses_lokal`.
-5.  **Mengunggah**: Mengunggah file hasil yang sama ke server FTP.
-6.  **Memberi Notifikasi**: Mengirimkan nama file hasil ke antrian (queue) RabbitMQ sebagai notifikasi bahwa pemrosesan telah selesai.
-7.  **Membersihkan**: Menghapus 8 file JSON sumber dari folder `data_mentah` setelah berhasil diproses.
-
-## Struktur Folder yang Dibutuhkan
-
-Pastikan Anda membuat struktur folder berikut di direktori yang sama dengan skrip:
+## Alur data
 
 ```
-.
-├── index.py                # Skrip utama ini
-├── .env                    # File konfigurasi (dibuat manual)
-├── requirements.txt        # File dependensi
-├── data_mentah/            # Tempat menaruh file JSON sumber
-├── hasil_proses_lokal/     # Hasil pemrosesan akan disimpan di sini
-└── temp_data/              # Digunakan sementara oleh skrip
+FTP FTP_SOURCE_FOLDER  <guid>_<timestamp>_<idx>.json (idx 1..8)
+   --> index.py (poll tiap 10 detik, satu batch per siklus)
+   --> FTP FTP_FOLDER_HASIL     SURVEY-<uuid4>-2025.json (larik 8x8)
+   --> FTP FTP_FOLDER_DATA_ROW  salinan 8 berkas sumber
+   --> RabbitMQ  result_queue   nama berkas hasil (teks)
+   --> RabbitMQ  graph_row      {"GUID_SURVEY": "...", "data": [nama 8 berkas]}
 ```
 
-## Instalasi dan Pengaturan
+- Batch valid: 8 berkas dengan `guid` sama, indeks 1..8, selisih timestamp paling lama 15 menit (`GROUPING_TIME_WINDOW_MINUTES`, `index.py:23`).
+- Berkas sumber dihapus dari FTP asal setelah hasil terunggah; salinan hasil disimpan lokal di `hasil_proses_lokal/`.
+- Antrean dideklarasikan non-durable (`index.py:352`); setiap publish membuka satu koneksi baru.
+- Diameter model tetap 0.3 (`DIAMETER`, `index.py:22`); nilai `inf` pada matriks diganti 0.
 
-1.  **Kloning Repositori (Opsional)**
-    Jika kode ini berada dalam repositori git, kloning terlebih dahulu.
+## Isi repo
 
-2.  **Buat Virtual Environment (Sangat Direkomendasikan)**
+| Berkas | Fungsi |
+|---|---|
+| `index.py` | Daemon produksi (`main()`, `process_batch`, `gcc`, `onetap`) |
+| `TerawangCC.py`, `experimentTRYTERAWANGCC.py` | Skrip uji coba offline GCC-PHAT |
+| `data/ketuk1..8.json` | Contoh sinyal 8 kanal untuk skrip uji coba |
+| `hasil_velo_akhir.json` | Contoh keluaran matriks 8x8 |
 
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # Di Windows: ./venv/Scripts/activate
-    ```
+## Konfigurasi
 
-3.  **Instal Dependensi**
-    Jalankan perintah berikut untuk menginstal semua pustaka Python yang diperlukan.
+Dibaca dari `.env` lewat python-dotenv (`index.py:28-43`).
 
-    ```bash
-    pip install -r requirements.txt
-    ```
+| Key | Isi |
+|---|---|
+| `FTP_HOST`, `FTP_PORT` | Alamat server FTP |
+| `FTP_USER`, `FTP_PASSWORD` | Akun FTP |
+| `FTP_SOURCE_FOLDER` | Folder sumber berkas sinyal (default `/terawang`) |
+| `FTP_FOLDER_HASIL` | Folder hasil (default `/result`) |
+| `FTP_FOLDER_DATA_ROW` | Folder salinan sumber (default `/data_row`) |
+| `RABBITMQ_HOST`, `RABBITMQ_PORT` | Alamat broker |
+| `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD` | Akun broker |
+| `RABBITMQ_VHOST` | Virtual host |
+| `RABBITMQ_QUEUE_RESULT` | Antrean hasil (default `result_queue`) |
+| `RABBITMQ_GRAPH_QUEUE` | Antrean data grafik (default `graph_row`) |
 
-4.  **Buat File Konfigurasi `.env`**
-    Buat file baru bernama `.env` di direktori yang sama dengan `main.py`. Salin konten dari file `.env.example` ke dalamnya dan isi dengan kredensial Anda yang sebenarnya.
+Lihat `.env.example`.
 
-    ```dotenv
-    # Konten untuk file .env
-    FTP_HOST=""
-    FTP_PORT=2121
-    FTP_USER=""
-    FTP_PASSWORD=""
-    FTP_FOLDER_HASIL="/result"
+## Menjalankan
 
-    RABBITMQ_HOST="r"
-    RABBITMQ_PORT=5672
-    RABBITMQ_USERNAME=""
-    RABBITMQ_PASSWORD=""
-    RABBITMQ_VHOST="/terawang"
-    RABBITMQ_QUEUE="result_queue"
-    ```
-
-## Menjalankan Layanan
-
-Untuk memulai layanan, cukup jalankan skrip utama dari terminal:
-
-```bash
+```
+python -m venv venv
+pip install -r requirements.txt
 python index.py
 ```
 
-Skrip akan mulai berjalan dan mencetak log aktivitasnya ke konsol. Untuk menghentikannya, tekan `Ctrl+C`.
+`requirements.txt`: `numpy==2.3`, `scipy==1.15.3`, `pika`, `python-dotenv`. Versi Python tidak dinyatakan; `match` (`index.py:182`) mensyaratkan 3.10 atau lebih baru.
+
+## Catatan
+
+- Default host, akun, dan password FTP/RabbitMQ tertanam di kode sebagai nilai bawaan `os.getenv` (`index.py:28-41`); tanpa `.env` daemon tetap berjalan dengan nilai tersebut.
+- `TerawangCC.py` mengimpor `pandas` yang tidak ada di `requirements.txt` dan menulis ke `.//ToF_Worker//contoh.json` yang tidak ada di repo.
+- README lama menyebut folder `data_mentah`; kode produksi membaca dari FTP, bukan folder lokal.
+- Tidak ada Dockerfile, test, atau lockfile.
+- Firmware `iot-terawang` mengunggah CSV `R<n>_<millis>.csv`, sedangkan worker membaca `<guid>_<timestamp>_<idx>.json`; penerbit berkas JSON belum diverifikasi.
